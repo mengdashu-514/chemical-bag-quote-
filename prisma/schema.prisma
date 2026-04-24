@@ -1,0 +1,120 @@
+// =====================================================================
+// 化工包装袋报价系统 - Prisma Schema
+// 版本：v0.1 (Phase 1)
+// 数据库：开发期 SQLite；生产期切换为 PostgreSQL（仅需改 datasource）
+// 配套文档：docs/02-database-design.md
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  // 开发期使用 SQLite，便于本地一键启动
+  // 生产环境请改为：provider = "postgresql" 并通过 DATABASE_URL 指向 PG
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------
+// 1. 型号 / 种类
+// ---------------------------------------------------------------------
+model Model {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  prices Price[]
+
+  @@index([isActive, sortOrder])
+}
+
+// ---------------------------------------------------------------------
+// 2. 尺寸
+// ---------------------------------------------------------------------
+model Size {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  width       Float?
+  height      Float?
+  gusset      Float?
+  unit        String   @default("mm")
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  prices Price[]
+
+  @@index([isActive, sortOrder])
+}
+
+// ---------------------------------------------------------------------
+// 3. 材质
+// ---------------------------------------------------------------------
+model Material {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  prices Price[]
+
+  @@index([isActive, sortOrder])
+}
+
+// ---------------------------------------------------------------------
+// 4. 价格映射表（核心 SKU 表）
+//   (modelId, sizeId, materialId) 三元组唯一定位一个报价
+//   注：SQLite 不支持 Decimal，开发期使用 Float；
+//       迁移到 PostgreSQL 后请改为 Decimal @db.Decimal(10, 2)
+// ---------------------------------------------------------------------
+model Price {
+  id         String   @id @default(cuid())
+  modelId    String
+  sizeId     String
+  materialId String
+
+  unitPrice Float
+  currency  String  @default("CNY")
+  moq       Int?
+  remark    String?
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  model    Model    @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  size     Size     @relation(fields: [sizeId], references: [id], onDelete: Cascade)
+  material Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+
+  @@unique([modelId, sizeId, materialId])
+  @@index([modelId])
+  @@index([modelId, sizeId])
+  @@index([isActive])
+}
+
+// ---------------------------------------------------------------------
+// 5. 后台管理员
+// ---------------------------------------------------------------------
+model AdminUser {
+  id           String    @id @default(cuid())
+  username     String    @unique
+  passwordHash String
+  displayName  String?
+  // SQLite 不支持 enum；用 String 存储，取值由应用层（src/lib/roles.ts）枚举约束。
+  // 迁移到 PostgreSQL 后可改回：role Role @default(STAFF)
+  role         String    @default("STAFF")
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
