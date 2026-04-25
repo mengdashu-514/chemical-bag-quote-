@@ -4,6 +4,7 @@
 import { z } from "zod";
 import type { NextResponse } from "next/server";
 import { apiError } from "@/lib/api-response";
+import { ROLES } from "@/lib/roles";
 
 // =====================================================================
 // 解析帮手
@@ -217,3 +218,37 @@ export const PublicQuoteQuery = z.object({
   quantity: z.coerce.number().int().positive().optional(),
 });
 export type PublicQuoteQuery = z.infer<typeof PublicQuoteQuery>;
+
+// =====================================================================
+// AdminUser
+// =====================================================================
+
+const RoleEnum = z.enum(ROLES);
+
+export const AdminUserCreateInput = z.object({
+  username: z
+    .string()
+    .min(3)
+    .max(64)
+    // 仅允许字母数字与 . _ -，避免奇怪字符撞 cookie / URL
+    .regex(/^[a-zA-Z0-9._-]+$/, "用户名仅支持字母、数字、._- "),
+  password: z.string().min(8).max(200),
+  displayName: z.string().min(1).max(64).nullish(),
+  role: RoleEnum.default("STAFF"),
+});
+export type AdminUserCreateInput = z.infer<typeof AdminUserCreateInput>;
+
+// 不允许直接改 username / password，密码改密走专用接口（v2 实现）
+export const AdminUserUpdateInput = z.object({
+  displayName: z.string().min(1).max(64).nullish(),
+  role: RoleEnum.optional(),
+  isActive: z.boolean().optional(),
+});
+export type AdminUserUpdateInput = z.infer<typeof AdminUserUpdateInput>;
+
+export const AdminUserListQuery = PaginationQuery.extend({
+  keyword: z.string().min(1).max(64).optional(),
+  isActive: boolFromQuery.optional(),
+  role: RoleEnum.optional(),
+});
+export type AdminUserListQuery = z.infer<typeof AdminUserListQuery>;
