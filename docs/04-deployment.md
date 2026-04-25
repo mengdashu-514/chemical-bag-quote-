@@ -9,8 +9,8 @@
 
 1. 环境变量与本地启动
 2. Vercel 部署
-3. **Docker 自托管**（本章）
-4. 运维 / 故障排查 / 升级手册
+3. Docker 自托管
+4. **运维 / 故障排查 / 升级手册**（本章）
 
 > 读者：第一次拉到代码、想在自己机器上 `npm run dev` 跑起来的开发者；以及之后做生产部署的运维。先读完第 1 章再去看 2 / 3 章，省事。
 
@@ -422,3 +422,241 @@ docker compose up -d --build app
 - [ ] 反向代理配置完，`https://...` 能访问 C 端首页
 - [ ] 真实管理员能登录，`admin / admin123` 已停用
 - [ ] `.env` 文件本机权限 `chmod 600`，不在备份里裸传
+
+---
+
+## 4. 运维 / 故障排查 / 升级手册
+
+> 这一章假设你已经按 §2 或 §3 把项目部署上线了。以下是上线**之后**会反复用到的操作清单。
+
+### 4.1 看日志
+
+#### Vercel 部署
+
+| 入口 | 内容 |
+|---|---|
+| Project → **Deployments** → 选某次部署 → **Build Logs** | `prisma generate` / `migrate deploy` / `next build` 的输出 |
+| Project → **Logs** | Function 运行时日志，按 path 过滤；`/api/admin/*` 报 500 时来这里捞 stack |
+| Project → **Logs** → 选时间范围 → **Live** | 实时尾随，调试登录 / 报价异常时打开 |
+
+代码里 catch 到未知错误时会 `console.error("[GET /api/admin/...]", err)`（见 `src/lib/crud-helpers.ts:81`），日志里搜对应路径就能定位。
+
+#### Docker 自托管
+
+```bash
+# 全部服务实时日志
+docker compose logs -f
+
+# 只看应用，过去 200 行
+docker compose logs --tail=200 app
+
+# 只看 db 启动健康状态
+docker compose logs db | grep -E "ready to accept|failed"
+```
+
+容器外只想观察活体状态：
+
+```bash
+docker compose ps                       # 哪个服务挂了一目了然
+docker stats --no-stream                # CPU / 内存占用
+docker compose exec db pg_isready       # Postgres 探活
+```
+
+### 4.2 重置某个管理员的密码
+
+当前 v1 **没有**自助改密接口（PRD §B 列在 v2）。运维只有两种正解：
+
+**方案 A：删了重建（推荐）**
+
+1. 用别的 ADMIN 账号登录 → `/admin/users` → 把目标账号"停用"（已经是软删，username 仍占用，不能复用）
+2. 新建一个同岗位、新 username 的账号给当事人
+3. 旧账号永久停用即可
+
+**方案 B：直接改 `passwordHash`（仅限只剩唯一 ADMIN 账号且自己也忘了密码）**
+
+```bash
+# 在 Docker 自托管：进 app 容器
+docker compose exec app node -e '
+  const bcrypt = require("bcryptjs");
+  const { PrismaClient } = require("@prisma/client");
+  const p = new PrismaClient();
+  (async () => {
+    const hash = await bcrypt.hash(process.env.NEW_PASSWORD, 10);
+    const r = await p.adminUser.update({
+      where: { username: process.env.TARGET_USERNAME },
+      data: { passwordHash: hash, isActive: true },
+    });
+    console.log("updated:", r.username);
+    await p.$disconnect();
+  })();
+' \
+  TARGET_USERNAME=admin \
+  NEW_PASSWORD='Reset!New_Pwd_2026'
+
+# Vercel 部署：本地用生产 DATABASE_URL 跑同一段
+DATABASE_URL="$(grep '^POSTGRES_PRISMA_URL=' .env.production.local | cut -d= -f2-)" \
+  TARGET_USERNAME=admin \
+  NEW_PASSWORD='Reset!New_Pwd_2026' \
+  npx tsx -e '... 上面的脚本主体 ...'
+```
+
+> 走 B 之后，请立刻让当事人登录修改身份信息或改用 A 流程把账号轮换。bcrypt 强度（cost=10）继承 `src/app/api/admin/users/route.ts:67` 的设定，与日常注册一致。
+
+### 4.3 错误码 → 定位手册
+
+`src/lib/api-response.ts:3-22` 已经枚举了 8 个错误码。用户在浏览器开发者工具里看到的 `error.code`，按下表反查：
+
+| `error.code` | HTTP | 最常见原因 | 第一时间该查哪 |
+|---|---|---|---|
+| `BAD_REQUEST` | 400 | 请求体不是合法 JSON / 路由 ID 格式不对 / 改自己 role | 客户端请求体；middleware/路由参数解析 |
+| `UNAUTHORIZED` | 401 | session cookie 过期、被 destroy（用户已停用） | `src/lib/session-config.ts` 的 `maxAge`；用户表 `isActive` |
+| `FORBIDDEN` | 403 | STAFF 调 `/api/admin/users` | `src/middleware.ts:21-29` |
+| `NOT_FOUND` | 404 | 删除时已被别人先删；C 端 `/api/public/quote` 命中下架价格 | DB 当前数据 |
+| `DUPLICATE_PRICE` | 422 | 已有 `(modelId, sizeId, materialId)` 三元组 | `crud-helpers.ts:43-54`；前端会引导改去编辑 |
+| `DUPLICATE_NAME` | 422 | `Model.code` / `Size.name` / `Material.name` / `AdminUser.username` 撞唯一索引 | `crud-helpers.ts:55-61` |
+| `VALIDATION_ERROR` | 422 | zod 校验失败；`details` 里有字段级原因 | 客户端表单；`src/lib/validators.ts` |
+| `INTERNAL_ERROR` | 500 | catch-all：未识别的 Prisma 错误 / 编程问题 | 服务端日志（§4.1）；带 `[contextTag]` 前缀 |
+
+> Prisma 错误码 `P2002 / P2003 / P2025` 已在 `crud-helpers.ts:35-71` 转译过，新增了未见过的码请按同一处补全，不要让原始 Prisma 异常裸抛给前端。
+
+### 4.4 备份与恢复
+
+**Postgres 是唯一有状态数据**——备份它就行（应用容器无状态）。
+
+#### Docker 自托管：每天 cron 一份 dump
+
+```bash
+# /etc/cron.d/cbq-backup —— root 用户
+0 3 * * * cd /opt/cbq && \
+  docker compose exec -T db pg_dump -U cbq -d cbq -Fc \
+    > /var/backups/cbq/cbq-$(date +\%F).dump && \
+  find /var/backups/cbq -name "cbq-*.dump" -mtime +30 -delete
+```
+
+`-Fc`（custom format）比明文 SQL 体积小、可以用 `pg_restore` 选择性恢复。**保留 30 天**，按业务可调。
+
+恢复：
+
+```bash
+# 假设要恢复 2026-04-25 的快照到当前 db
+docker compose exec -T db pg_restore -U cbq -d cbq --clean --if-exists \
+  < /var/backups/cbq/cbq-2026-04-25.dump
+```
+
+> `--clean --if-exists`：先 DROP 再 CREATE，避免与现有表冲突。**这条命令会清掉当前数据**，确认后再敲。
+
+#### Vercel Postgres：用 Storage 控制台
+
+Storage → 选你的 Postgres → **Backups**。Vercel Postgres 默认每天自动一次快照，保留 7 天；可点击恢复到新数据库（不能直接覆盖原库）。需要更长保留期或异地备份，改用外部脚本：
+
+```bash
+# 用 vercel env pull 拿到 POSTGRES_URL_NON_POOLING（不能走 PgBouncer）
+vercel env pull .env.production.local
+DATABASE_URL_PG="$(grep '^POSTGRES_URL_NON_POOLING=' .env.production.local | cut -d= -f2-)"
+pg_dump "$DATABASE_URL_PG" -Fc > cbq-$(date +%F).dump
+rm .env.production.local   # 含连接密码，跑完立刻删
+```
+
+### 4.5 SQLite → PostgreSQL 数据迁移（如果开发期已经积了真实数据）
+
+> 大多数情况下 v1 上线前 SQLite 数据是开发的"垃圾数据"，**直接重建 + 重灌种子**最快。下面这段只在你**真的**要把 SQLite 里的运营数据搬到生产时用。
+
+```bash
+# 1. 在 SQLite 库上导出每张表为 JSON（用 prisma studio 或 sqlite3 .dump 都行）
+# 这里给一段 tsx 脚本思路：
+DATABASE_URL="file:./prisma/dev.db" npx tsx -e '
+  const { PrismaClient } = require("@prisma/client");
+  const fs = require("fs");
+  const p = new PrismaClient();
+  (async () => {
+    const out = {
+      models: await p.model.findMany(),
+      sizes: await p.size.findMany(),
+      materials: await p.material.findMany(),
+      prices: await p.price.findMany(),
+      adminUsers: await p.adminUser.findMany(),
+    };
+    fs.writeFileSync("dump.json", JSON.stringify(out, null, 2));
+    await p.$disconnect();
+  })();
+'
+
+# 2. 在 Postgres 库上反向导入（注意 ID 全字段保留，避免外键失效）
+DATABASE_URL="postgresql://..." npx tsx -e '
+  const { PrismaClient } = require("@prisma/client");
+  const fs = require("fs");
+  const p = new PrismaClient();
+  const data = JSON.parse(fs.readFileSync("dump.json", "utf8"));
+  (async () => {
+    // 顺序：先建基础库再建价格，避免外键炸
+    for (const m of data.models)    await p.model.create({ data: m });
+    for (const s of data.sizes)     await p.size.create({ data: s });
+    for (const m of data.materials) await p.material.create({ data: m });
+    for (const pr of data.prices)   await p.price.create({ data: pr });
+    for (const u of data.adminUsers) await p.adminUser.create({ data: u });
+    console.log("import done");
+    await p.$disconnect();
+  })();
+'
+
+# 3. 立刻删掉 dump.json —— 它含 passwordHash
+shred -u dump.json   # Linux；macOS 用 rm -P dump.json
+```
+
+### 4.6 版本升级与回滚
+
+#### 升级（已经在线，要发新版本）
+
+```bash
+# 1. 拉新代码
+git pull
+
+# 2. 必看：本次有没有 schema 改动？
+git diff <prev-tag>..HEAD -- prisma/migrations
+#    有新迁移文件 → entrypoint 会自动应用；继续即可
+#    有破坏性 DDL（drop column 等）→ 务必先备份（§4.4）
+
+# 3. 触发部署
+#    Vercel：git push 即可，Vercel 自动重新构建
+#    Docker：docker compose up -d --build app
+```
+
+#### 回滚（新版本上线后炸了）
+
+| 部署方式 | 回滚操作 |
+|---|---|
+| Vercel | Project → Deployments → 找上一个 ✅ Production → **Promote to Production**（秒级回滚，不重 build） |
+| Docker | `git checkout <prev-tag> && docker compose up -d --build app` |
+
+**数据库回滚特别注意**：Prisma migrate 没有自动 down 脚本。如果新版本里跑了破坏性迁移（drop / rename），代码回滚 ≠ schema 回滚，旧版本可能跑不动新 schema。**结论**：
+
+1. 上线**破坏性**迁移前，永远先备份一份 dump（§4.4）。
+2. 真出事 → 代码回滚 + 用 dump 把库恢复到迁移前。
+3. 之后再排查为什么新迁移失败。
+
+### 4.7 常见疑难一句话定位
+
+| 现象 | 第一嫌疑 |
+|---|---|
+| C 端首页空白 / 接口 500 | DATABASE_URL 缺失或连不上；查 §4.1 日志 |
+| 登录后立刻被踢 / `/api/auth/me` 401 | 反向代理没开 HTTPS，cookie 因 `secure: true` 没回传（§3.6） |
+| 登录返回"用户名或密码错误"但密码确认正确 | 该账号 `isActive=false`；§4.2 重置或换账号 |
+| `/api/admin/*` 全 401 | `SESSION_SECRET` 不一致（重启前后变了，老 cookie 全部失效） |
+| build 时 "Could not load query engine" | Prisma 运行时缺 alpine 引擎；schema 里加 `binaryTargets = ["native", "linux-musl-openssl-3.0.x"]` 后重 build |
+| `prisma migrate deploy` 在 Vercel 报 "prepared statement" | DATABASE_URL 走了 PgBouncer 池化连接；按 §2.4 加 `DIRECT_URL` |
+| 后台改了价格但 C 端还看得见旧的 | 同一账号下 Service Worker 缓存（v1 没注册）通常不是问题；先排查是否点了"下架"而不是"删除" |
+
+### 4.8 升级路线图（v2 候选）
+
+PRD §3.2 列了不在 v1 范围的事项；v2 上来运维侧最值得做的：
+
+- 操作审计日志（谁在何时改了哪条价格）—— 上线前先建表，再加路由级中间件
+- C 端询价日志（写 `InquiryLog`，给销售跟进）—— API 规范 §6.A1 已经预留
+- 价格历史曲线 —— 用 audit 表回放即可
+- Excel 批量导入 —— `/admin/prices/import` 上传 + zod 行级校验
+
+这些都不影响 v1 已上线的服务，可灰度推进。
+
+---
+
+部署文档全部完成。配套阅读：`docs/01-prd.md`（业务边界）、`docs/02-database-design.md`（schema 决策）、`docs/03-api-spec.md`（接口契约）。
