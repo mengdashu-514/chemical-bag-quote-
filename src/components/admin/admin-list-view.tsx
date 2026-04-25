@@ -29,6 +29,24 @@ export interface ColumnDef<TRow> {
   className?: string;
 }
 
+// 危险动作的文案配置：默认是"删除/确认删除"，users 页可改成"停用/确认停用"
+export interface DangerAction {
+  rowLabel: string; // 行内按钮文字，如"删除"或"停用"
+  confirmTitle: string; // 二次确认弹窗标题
+  confirmCta: string; // 弹窗确认按钮文字
+  submittingCta: string; // 提交中按钮文字
+  intro?: string; // 弹窗里 record 上方的引导句，缺省"该记录将被永久删除："
+  warning?: string; // 强提示（如级联删除提示）
+}
+
+const DEFAULT_DANGER: DangerAction = {
+  rowLabel: "删除",
+  confirmTitle: "确认删除？",
+  confirmCta: "确认删除",
+  submittingCta: "删除中…",
+  intro: "该记录将被永久删除：",
+};
+
 export interface AdminListViewProps<TRow extends BaseRow, TForm> {
   title: string;
   searchPlaceholder?: string;
@@ -36,9 +54,11 @@ export interface AdminListViewProps<TRow extends BaseRow, TForm> {
   // 默认/编辑表单初值
   emptyForm: TForm;
   toForm: (row: TRow) => TForm;
+  // mode 让具体页面在 create / edit 模式下渲染不同字段（如新增需密码、编辑无）
   renderForm: (
     form: TForm,
     setForm: Dispatch<SetStateAction<TForm>>,
+    mode: "create" | "edit",
   ) => ReactNode;
 
   // 后端调用
@@ -52,7 +72,9 @@ export interface AdminListViewProps<TRow extends BaseRow, TForm> {
   onUpdate: (id: string, form: TForm) => Promise<unknown>;
   onDelete: (id: string) => Promise<unknown>;
 
-  // 删除二次确认时的额外强提示文案（如"将级联删除 N 条相关价格"）
+  // 危险动作文案（删除/停用）；不传则按默认"删除"。
+  dangerAction?: Partial<DangerAction>;
+  // 兼容旧调用：早期三页用 deleteCascadeWarning 直接传文案
   deleteCascadeWarning?: string;
 }
 
@@ -69,8 +91,14 @@ export function AdminListView<TRow extends BaseRow, TForm>({
   onCreate,
   onUpdate,
   onDelete,
+  dangerAction,
   deleteCascadeWarning,
 }: AdminListViewProps<TRow, TForm>) {
+  const danger: DangerAction = {
+    ...DEFAULT_DANGER,
+    ...(deleteCascadeWarning ? { warning: deleteCascadeWarning } : {}),
+    ...(dangerAction ?? {}),
+  };
   const [page, setPage] = useState(1);
   const pageSize = 20;
   const [keywordInput, setKeywordInput] = useState("");
@@ -307,7 +335,7 @@ export function AdminListView<TRow extends BaseRow, TForm>({
                       }}
                       className="rounded-md border border-destructive/40 px-2.5 py-1 text-xs text-destructive hover:bg-destructive/10"
                     >
-                      删除
+                      {danger.rowLabel}
                     </button>
                   </div>
                 </td>
@@ -354,7 +382,7 @@ export function AdminListView<TRow extends BaseRow, TForm>({
       {(creating || editing) && (
         <Modal title={editing ? "编辑" : "新增"} onClose={closeDialog}>
           <form onSubmit={handleSubmit} className="space-y-4">
-            {renderForm(form, setForm)}
+            {renderForm(form, setForm, editing ? "edit" : "create")}
             {submitError && (
               <p className="text-sm text-destructive" role="alert">
                 {submitError}
@@ -380,16 +408,16 @@ export function AdminListView<TRow extends BaseRow, TForm>({
         </Modal>
       )}
 
-      {/* 删除确认 */}
+      {/* 危险动作（删除 / 停用）二次确认 */}
       {deleting && (
-        <Modal title="确认删除？" onClose={() => setDeleting(null)}>
+        <Modal title={danger.confirmTitle} onClose={() => setDeleting(null)}>
           <div className="space-y-3 text-sm">
-            <p>该记录将被永久删除：</p>
+            {danger.intro && <p>{danger.intro}</p>}
             <p className="rounded-md bg-muted px-3 py-2 font-medium">
               {columns[0]?.render(deleting)}
             </p>
-            {deleteCascadeWarning && (
-              <p className="text-destructive">{deleteCascadeWarning}</p>
+            {danger.warning && (
+              <p className="text-destructive">{danger.warning}</p>
             )}
             {deleteError && (
               <p className="text-sm text-destructive" role="alert">
@@ -410,7 +438,7 @@ export function AdminListView<TRow extends BaseRow, TForm>({
                 disabled={deleteSubmitting}
                 className="rounded-md bg-destructive px-4 py-1.5 text-sm font-medium text-destructive-foreground disabled:opacity-60"
               >
-                {deleteSubmitting ? "删除中…" : "确认删除"}
+                {deleteSubmitting ? danger.submittingCta : danger.confirmCta}
               </button>
             </div>
           </div>
