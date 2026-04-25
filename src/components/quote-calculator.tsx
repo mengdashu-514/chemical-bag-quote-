@@ -40,6 +40,11 @@ export function QuoteCalculator() {
   const [loadingQuote, setLoadingQuote] = useState(false);
   const [copied, setCopied] = useState(false);
 
+  // 当前 materials 列表对应的 (modelId, sizeId) 组合 key。
+  // quote effect 用它判断材质列表是否已经为最新组合刷新过；没刷新就别发请求，
+  // 否则会用上一组合的 materialId 去查新组合的报价拿到 404（PRD §C-9 的级联竞态）。
+  const [materialsForKey, setMaterialsForKey] = useState<string>("");
+
   // 1) 初始：拉所有上架型号
   useEffect(() => {
     let cancelled = false;
@@ -93,6 +98,7 @@ export function QuoteCalculator() {
     if (!modelId || !sizeId) {
       setMaterials([]);
       setMaterialId("");
+      setMaterialsForKey("");
       return;
     }
     let cancelled = false;
@@ -102,11 +108,13 @@ export function QuoteCalculator() {
         if (cancelled) return;
         setMaterials(list);
         setMaterialId((prev) => (list.some((m) => m.id === prev) ? prev : ""));
+        setMaterialsForKey(`${modelId}|${sizeId}`);
       })
       .catch(() => {
         if (cancelled) return;
         setMaterials([]);
         setMaterialId("");
+        setMaterialsForKey("");
       })
       .finally(() => {
         if (!cancelled) setLoadingMaterials(false);
@@ -121,6 +129,11 @@ export function QuoteCalculator() {
     if (!modelId || !sizeId || !materialId) {
       setQuote(null);
       setQuoteError(null);
+      return;
+    }
+    // 等材质列表与当前 (modelId, sizeId) 同步过，再发 quote 请求。
+    // 否则切换上层时会用旧 materialId 查新组合，必拿 404。
+    if (materialsForKey !== `${modelId}|${sizeId}`) {
       return;
     }
     let cancelled = false;
@@ -148,7 +161,7 @@ export function QuoteCalculator() {
     return () => {
       cancelled = true;
     };
-  }, [modelId, sizeId, materialId]);
+  }, [modelId, sizeId, materialId, materialsForKey]);
 
   // 输入数量解析为 int；空串 / 非法 → undefined
   const parsedQuantity = useMemo<number | undefined>(() => {

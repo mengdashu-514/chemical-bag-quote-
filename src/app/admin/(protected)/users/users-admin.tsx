@@ -126,7 +126,10 @@ export function UsersAdmin({ currentUserId }: { currentUserId: string }) {
               required
               minLength={3}
               maxLength={64}
-              pattern="[a-zA-Z0-9._-]+"
+              // HTML pattern 属性在 Chrome 120+ 走 RegExp `v` flag，规则比默认的 `u` 严：
+              // 字符类里的字面 `-` 必须显式转义为 `\-`。JSX 普通 string attribute 不解析 JS 转义
+              // （`"\\-"` 字面是两个反斜杠+减号），所以这里用 `{...}` 走 JS 表达式，求值后是 `\-`。
+              pattern={"[a-zA-Z0-9._\\-]+"}
               disabled={mode === "edit"}
               value={form.username}
               onChange={(e) =>
