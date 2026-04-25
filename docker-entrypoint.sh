@@ -6,8 +6,10 @@
 # =====================================================================
 set -e
 
+# Next.js standalone 产物不带 node_modules/.bin 链接，所以不能用 npx prisma；
+# 直接调 prisma 包里的 build/index.js 入口。
 echo "[entrypoint] running prisma migrate deploy..."
-npx --no-install prisma migrate deploy
+node /app/node_modules/prisma/build/index.js migrate deploy
 
 echo "[entrypoint] starting next server: $*"
 exec "$@"

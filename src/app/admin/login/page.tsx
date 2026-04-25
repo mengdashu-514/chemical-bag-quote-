@@ -1,14 +1,28 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 import { AdminApiError, login } from "@/lib/admin-api";
 
 // /admin/login —— 不在 (protected) 组里，因此无 session 也可访问。
 // 登录成功后跳到 ?next= 指定的页面（layout 拦截时会带上 next），缺省回 /admin。
+//
+// useSearchParams() 在生产 build 的预渲染阶段会 bail out 到客户端，
+// 必须用 Suspense 边界包住，否则 next build 会失败。表单本身不依赖 query，
+// 拆出去后预渲染骨架走静态、查询参数解析交给客户端。
 
 export default function LoginPage() {
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-muted/40 px-4">
+      <Suspense fallback={<LoginShell disabled />}>
+        <LoginForm />
+      </Suspense>
+    </main>
+  );
+}
+
+function LoginForm() {
   const router = useRouter();
   // typedRoutes 要求 router.replace 拿 Route 类型；?next= 是用户输入，断言后由 Next 校验
   const next = (useSearchParams().get("next") ?? "/admin") as Route;
@@ -39,54 +53,74 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-muted/40 px-4">
-      <form
-        onSubmit={onSubmit}
-        className="w-full max-w-sm space-y-5 rounded-lg border bg-card p-6 shadow-sm"
+    <form
+      onSubmit={onSubmit}
+      className="w-full max-w-sm space-y-5 rounded-lg border bg-card p-6 shadow-sm"
+    >
+      <header className="space-y-1 text-center">
+        <h1 className="text-xl font-semibold">后台登录</h1>
+        <p className="text-sm text-muted-foreground">化工包装袋报价系统</p>
+      </header>
+
+      <label className="block space-y-1.5">
+        <span className="text-sm font-medium">用户名</span>
+        <input
+          type="text"
+          autoComplete="username"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          required
+          className="h-10 w-full rounded-md border border-input bg-background px-3 outline-none focus:ring-2 focus:ring-ring"
+        />
+      </label>
+
+      <label className="block space-y-1.5">
+        <span className="text-sm font-medium">密码</span>
+        <input
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+          className="h-10 w-full rounded-md border border-input bg-background px-3 outline-none focus:ring-2 focus:ring-ring"
+        />
+      </label>
+
+      {error && (
+        <p className="text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+
+      <button
+        type="submit"
+        disabled={submitting}
+        className="h-10 w-full rounded-md bg-primary font-medium text-primary-foreground disabled:opacity-60"
       >
-        <header className="space-y-1 text-center">
-          <h1 className="text-xl font-semibold">后台登录</h1>
-          <p className="text-sm text-muted-foreground">化工包装袋报价系统</p>
-        </header>
+        {submitting ? "登录中…" : "登录"}
+      </button>
+    </form>
+  );
+}
 
-        <label className="block space-y-1.5">
-          <span className="text-sm font-medium">用户名</span>
-          <input
-            type="text"
-            autoComplete="username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            className="h-10 w-full rounded-md border border-input bg-background px-3 outline-none focus:ring-2 focus:ring-ring"
-          />
-        </label>
-
-        <label className="block space-y-1.5">
-          <span className="text-sm font-medium">密码</span>
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            className="h-10 w-full rounded-md border border-input bg-background px-3 outline-none focus:ring-2 focus:ring-ring"
-          />
-        </label>
-
-        {error && (
-          <p className="text-sm text-destructive" role="alert">
-            {error}
-          </p>
-        )}
-
-        <button
-          type="submit"
-          disabled={submitting}
-          className="h-10 w-full rounded-md bg-primary font-medium text-primary-foreground disabled:opacity-60"
-        >
-          {submitting ? "登录中…" : "登录"}
-        </button>
-      </form>
-    </main>
+// Suspense fallback：和 LoginForm 一样的骨架，但所有交互禁用。
+// 预渲染阶段会渲这版；hydration 后立刻被真表单替换，用户基本看不到。
+function LoginShell({ disabled }: { disabled?: boolean }) {
+  return (
+    <div className="w-full max-w-sm space-y-5 rounded-lg border bg-card p-6 shadow-sm opacity-60">
+      <header className="space-y-1 text-center">
+        <h1 className="text-xl font-semibold">后台登录</h1>
+        <p className="text-sm text-muted-foreground">化工包装袋报价系统</p>
+      </header>
+      <div className="h-10 w-full rounded-md border border-input bg-background" />
+      <div className="h-10 w-full rounded-md border border-input bg-background" />
+      <button
+        type="button"
+        disabled={disabled}
+        className="h-10 w-full rounded-md bg-primary font-medium text-primary-foreground disabled:opacity-60"
+      >
+        登录
+      </button>
+    </div>
   );
 }

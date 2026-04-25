@@ -347,6 +347,8 @@ docker compose up -d --build
 docker compose logs -f app
 ```
 
+> 如果你的项目目录含**非 ASCII 字符**（如中文 `报价/`），Compose 会报 `project name must not be empty`。给所有 `docker compose ...` 都加上 `-p cbq` 即可（会被用作项目名），如：`docker compose -p cbq up -d --build`。
+
 期望看到的关键行：
 
 ```
