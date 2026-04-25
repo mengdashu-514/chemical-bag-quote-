@@ -7,8 +7,8 @@
 
 本手册四章逐层覆盖：
 
-1. **环境变量与本地启动**（本章）
-2. Vercel 部署
+1. 环境变量与本地启动
+2. **Vercel 部署**（本章）
 3. Docker 自托管
 4. 运维 / 故障排查 / 升级手册
 
@@ -142,3 +142,149 @@ DATABASE_URL="postgresql://..." npx tsx prisma/seed.ts
 - [ ] `.env` 里的 `SESSION_SECRET` 已改成你自己生成的 32+ 字符随机串
 
 第 1 步全部就绪。下一章讲怎么把这套东西推到 Vercel。
+
+---
+
+## 2. Vercel 部署
+
+### 2.1 先决条件 / 适用边界
+
+Vercel 适合：用户主要在境外或对延迟不敏感、想要"零运维 + Git 推送即上线"。**不适合**：用户全在中国大陆且对首屏延迟敏感（Vercel 默认机房在美国，国内访问慢；中国大陆没有节点可选）—— 这种场景请直接用第 3 章 Docker 自托管。
+
+不能保留 SQLite 上 Vercel：
+
+- Vercel 的 Serverless 函数文件系统是只读 + 短生命周期，每次冷启都是新容器，`prisma/dev.db` 写不进去也不连续。
+- 必须切到托管 PostgreSQL。下面默认用 **Vercel Postgres**（同账号一键开），自己接 Supabase / Neon / 阿里云 RDS 也是同样的连接串方式。
+
+### 2.2 准备工作（在推 Vercel 之前完成）
+
+#### 2.2.1 切换 Prisma datasource 到 PostgreSQL
+
+按 §1.6 把 `prisma/schema.prisma` 改成 `provider = "postgresql"`，并把 SQLite 妥协改回原生类型（`Price.unitPrice` → `Decimal @db.Decimal(10, 2)`、`AdminUser.role` → 枚举），然后**生成新的 Postgres 迁移**：
+
+```bash
+# 用临时本地 Postgres 试一遍，确认迁移能跑通；用完即弃
+docker run --rm -d --name pg-cbq -p 5432:5432 \
+  -e POSTGRES_PASSWORD=devpwd -e POSTGRES_DB=cbq postgres:16
+DATABASE_URL="postgresql://postgres:devpwd@localhost:5432/cbq?schema=public" \
+  npx prisma migrate dev --name init_pg
+
+# 确认 prisma/migrations/ 下新增了一条 *_init_pg/migration.sql
+docker rm -f pg-cbq
+```
+
+把这条新迁移文件**也 commit 进去**——Vercel 构建时会调用 `prisma migrate deploy` 应用它。
+
+> ⚠️ SQLite 时代生成的那条 `20260424060354_init/migration.sql` 是 SQLite 方言（`DATETIME`、`REAL`），不能直接拿到 Postgres 上跑。Postgres 必须有自己的迁移目录。**生产首次部署前**：要么删掉 SQLite 那条迁移只留 Postgres 版本（项目还没上线、可以重置历史），要么在新分支专门给生产用。本项目 v1 还没上线，推荐前者。
+
+#### 2.2.2 让 build 自动跑 prisma generate + migrate deploy
+
+Vercel 默认只跑 `npm run build`。Prisma 在 Serverless 环境**必须**在 build 阶段生成 client（不然运行时拿不到 `@prisma/client`），生产首次还要把迁移应用到数据库。改 `package.json` 的 build 脚本：
+
+```diff
+ "scripts": {
+   "dev": "next dev",
+-  "build": "next build",
++  "build": "prisma generate && prisma migrate deploy && next build",
+   ...
+ }
+```
+
+> 为什么把 `migrate deploy` 也塞进 build：Vercel 没有"运行一次"的钩子；放 build 里每次部署都会跑，但 `migrate deploy` 是幂等的（已应用的迁移会跳过），安全。
+
+### 2.3 在 Vercel 控制台导入项目
+
+1. 把代码推到 GitHub / GitLab / Bitbucket（任一）。
+2. 登录 https://vercel.com → **Add New… → Project** → 选中代码仓库 → **Import**。
+3. **Framework Preset** 自动识别为 **Next.js**，不用改。
+4. **Root Directory**：如果仓库根就是项目根，留默认；如果项目放在 `chemical-bag-quote/` 子目录里，改成那个子目录。
+5. **Build Command / Output Directory** 全部留默认（已经被 §2.2.2 改过的 `build` 脚本接管）。
+6. 暂时**别**点 Deploy——先到 Storage 配 Postgres，否则首次 build 一定会因为 `DATABASE_URL` 缺失或连不上而 fail。
+
+### 2.4 开通 Vercel Postgres 并挂到项目
+
+在项目页面 → **Storage** → **Create** → 选 **Postgres** → 起个名（如 `cbq-prod`）→ 选 region（**Singapore (sin1)** 离中国最近，香港 / 国内访问尚可）→ Create。
+
+创建后控制台会自动把这些环境变量注入到项目（**Production / Preview / Development** 三套环境都注入）：
+
+```
+POSTGRES_URL
+POSTGRES_PRISMA_URL          ← 给 Prisma 用，含连接池参数
+POSTGRES_URL_NON_POOLING     ← 给 migrate deploy 用，绕过 PgBouncer
+POSTGRES_USER
+POSTGRES_HOST
+POSTGRES_PASSWORD
+POSTGRES_DATABASE
+```
+
+我们的 schema 里只读 `DATABASE_URL`，所以再加两条**手动**环境变量来桥接：
+
+| Vercel 环境变量名 | 值（**Reference** 选项里指向） |
+|---|---|
+| `DATABASE_URL` | `POSTGRES_PRISMA_URL` |
+| `DIRECT_URL`（可选） | `POSTGRES_URL_NON_POOLING` |
+
+> 如果用了 `DIRECT_URL`，记得在 schema datasource 里加上 `directUrl = env("DIRECT_URL")`，让 `migrate deploy` 走非池化连接（PgBouncer 不允许 prepared statements，迁移会出错）。
+
+### 2.5 配齐其他环境变量
+
+进 Project → **Settings → Environment Variables**，按下表逐条加，**Production / Preview / Development** 三栏都勾上：
+
+| 变量 | 值 |
+|---|---|
+| `SESSION_SECRET` | `openssl rand -base64 32` 输出，≥ 32 字符 |
+| `NEXT_PUBLIC_SITE_URL` | 部署后的正式域名，如 `https://cbq.your-domain.com`，无尾斜杠 |
+| `DATABASE_URL` | 见 §2.4，引用 `POSTGRES_PRISMA_URL` |
+| `DIRECT_URL`（可选） | 见 §2.4，引用 `POSTGRES_URL_NON_POOLING` |
+
+> Preview 环境的 `SESSION_SECRET` 可以和 Production 不一样——这样预览站不会"借走"生产的登录态，更安全。
+
+### 2.6 第一次部署
+
+回到 **Deployments** 标签 → **Redeploy** 触发一次。盯着 build log，关键是这几行：
+
+```
+✓ Generated Prisma Client (...)        ← prisma generate 成功
+✓ All migrations have been successfully applied  ← migrate deploy 成功
+✓ Compiled successfully                ← next build 成功
+```
+
+任何一行红了就停下来回查 §2.2 / §2.4 / §2.5。Vercel 会保留全量 build log 30 天，可对照原始报错。
+
+### 2.7 首次部署后的硬化（必做）
+
+数据库刚迁好是空的——**还没有任何后台用户能登录**。在 Vercel CLI 或本地都行，跑一次 seed：
+
+```bash
+# 拉一份生产 DATABASE_URL（在 Vercel CLI 里）
+vercel env pull .env.production.local
+
+# 用生产连接串单跑一次 seed
+DATABASE_URL="$(grep '^POSTGRES_PRISMA_URL=' .env.production.local | cut -d= -f2-)" \
+  npx tsx prisma/seed.ts
+```
+
+跑完后立刻：
+
+1. 用 `admin / admin123` 登一次 `/admin/login` 确认能进。
+2. 进 `/admin/users`，**新建一个真实管理员**（独立用户名 + 强密码 ≥ 16 位）。
+3. 用新管理员登录 → 把 `admin` 账号停用。
+4. 把 `.env.production.local` **从本地删掉**——它含生产数据库直连密码。
+
+### 2.8 Cold start 与函数超时
+
+Vercel Serverless 的冷启对 Prisma 不算友好（首请求要拉 client、建连接池），首响应 P95 可能 1~2 秒。两个常用缓解：
+
+1. **配置函数 region** 与 Postgres region 一致（都用 sin1），避免跨大洲来回。Project → Settings → Functions → **Function Region**。
+2. **iron-session cookie 长一点**：`src/lib/session-config.ts` 里 `maxAge` 已经是 7 天，意味着销售/运营登录一次后基本不会重登，冷启只影响 C 端首屏——可以接受。
+
+如果对延迟非常敏感（特别是中国大陆用户为主），就别死磕 Vercel，直接看第 3 章 Docker 自托管。
+
+### 2.9 自检清单（部署完应该满足）
+
+- [ ] Production 域名能打开，C 端首页拉得出"型号"下拉
+- [ ] `/admin/login` 用新建的真实管理员账号能登录
+- [ ] `admin / admin123` 已停用，登录返回"用户名或密码错误"
+- [ ] `/admin/prices` 能列出种子数据（4 条 SKU）
+- [ ] Vercel Build Log 里能看到 `prisma migrate deploy` 跑过
+- [ ] `SESSION_SECRET` 在 Vercel 环境变量界面是 **Encrypted**，未在 build log 中明文打印
