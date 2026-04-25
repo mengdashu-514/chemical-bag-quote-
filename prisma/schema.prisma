@@ -1,7 +1,7 @@
 // =====================================================================
 // 化工包装袋报价系统 - Prisma Schema
 // 版本：v0.1 (Phase 1)
-// 数据库：开发期 SQLite；生产期切换为 PostgreSQL（仅需改 datasource）
+// 数据库：PostgreSQL（通过 DATABASE_URL 指向 PG 实例）
 // 配套文档：docs/02-database-design.md
 // =====================================================================
 
@@ -10,9 +10,7 @@ generator client {
 }
 
 datasource db {
-  // 开发期使用 SQLite，便于本地一键启动
-  // 生产环境请改为：provider = "postgresql" 并通过 DATABASE_URL 指向 PG
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
