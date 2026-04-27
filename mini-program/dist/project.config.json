@@ -1,0 +1,16 @@
+{
+  "miniprogramRoot": "./",
+  "projectname": "chemical-bag-quote-mini",
+  "description": "化工包装袋报价小程序",
+  "appid": "请替换为你的小程序AppID",
+  "setting": {
+    "urlCheck": true,
+    "es6": false,
+    "enhance": false,
+    "compileHotReLoad": false,
+    "postcss": false,
+    "minified": false,
+    "bundle": false
+  },
+  "compileType": "miniprogram"
+}
